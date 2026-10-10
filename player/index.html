@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>CueSign Player</title>
+  <style>
+    /* On a BrightSign the video is on the hardware plane behind this page, so the page
+       itself has to stay transparent. In a desktop browser it gets a black background. */
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; cursor: none; }
+    html.browser { background: #000; }
+
+    .layer { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+    #video { z-index: 0; object-fit: contain; }
+    img.layer { z-index: 1; opacity: 0; object-fit: contain; background: #000; }
+    #curtain { z-index: 5; background: #000; opacity: 1; }
+
+    #info {
+      z-index: 6; display: none; align-items: center; justify-content: center; flex-direction: column;
+      color: #9aa3ad; font: 28px/1.6 Helvetica, Arial, sans-serif; text-align: center;
+    }
+    #info.visible { display: flex; }
+    #info h1 { color: #fff; font-size: 44px; font-weight: 600; margin: 0 0 12px; }
+    #info b { color: #fff; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <video id="video" class="layer" hwz="z-index:-1" playsinline></video>
+  <img id="imgA" class="layer" alt="">
+  <img id="imgB" class="layer" alt="">
+  <div id="curtain" class="layer"></div>
+  <div id="info" class="layer">
+    <h1>CueSign</h1>
+    <div>Player <b id="info-id"></b></div>
+    <div>Server <b id="info-server"></b></div>
+    <div id="info-status"></div>
+  </div>
+  <script src="player.js"></script>
+</body>
+</html>

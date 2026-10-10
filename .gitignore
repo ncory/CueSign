@@ -1,0 +1,14 @@
+# .NET
+bin/
+obj/
+dist/
+
+# Web UI (built into server/wwwroot by "npm run build")
+node_modules/
+server/wwwroot/
+
+# Runtime data: media library, playlists, players
+data/
+
+.DS_Store
+.claude/

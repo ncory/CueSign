@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>CueSign</AssemblyName>
+    <RootNamespace>CueSign.Server</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Runtime data (library, playlists) is never part of the build. -->
+    <Content Remove="data\**" />
+    <None Remove="data\**" />
+    <!-- Ship the BrightSign player files with the server so it can preview them and build the SD card zip. -->
+    <Content Include="..\player\**\*" Link="player\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
