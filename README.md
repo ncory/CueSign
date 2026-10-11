@@ -7,6 +7,9 @@ playlists; each player shows whatever the server cues it to, playing from its ow
 player/   HTML/JS page + autorun.brs that go on the BrightSign's SD card
 server/   ASP.NET Core (.NET 10) server: API, WebSockets, timers, media storage
 web/      React + TypeScript control UI, built into server/wwwroot
+app/      Menu bar (macOS) / notification area (Windows) app that runs the server
+scripts/  Packaging scripts for the desktop app
+tools/    make-icons.swift, which draws the app and tray icons
 ```
 
 ## How it works
@@ -36,7 +39,39 @@ web/      React + TypeScript control UI, built into server/wwwroot
   also load any one screen of a playlist on its own. This is close-enough-by-eye sync over the
   network, not frame lock.
 
+## The desktop app
+
+On a Mac or Windows PC, CueSign runs as a small app with no window: an icon in the menu bar
+(macOS) or notification area (Windows). The server runs for as long as that app does.
+
+- The icon is hollow with no players online and solid when any are.
+- The menu shows how many players are online and the address to open from other devices, and
+  has **Open CueSign** (the control UI in your browser), **Show Data Folder**, **Start at Login**
+  and **Quit**. With players connected, Quit asks for a second click.
+- Show data lives in `~/Library/Application Support/CueSign` (macOS) or `%AppData%\CueSign`
+  (Windows). Pass `--data <folder>` or `--port <number>` to change that.
+- Opening a second copy just opens the control UI of the one already running.
+
+Build it with:
+
+```bash
+scripts/build-mac.sh
+```
+
+```bash
+scripts/build-windows.sh
+```
+
+Both write to `dist/`. The Windows build can be made on a Mac. Without signing credentials the
+macOS app is only ad-hoc signed, which is fine on the Mac that built it; to sign and notarize
+for other Macs, set `CODESIGN_IDENTITY` and `NOTARY_PROFILE` as described at the top of
+`scripts/build-mac.sh`. The Windows build is unsigned, so SmartScreen warns on first run.
+
+During development, `dotnet run --project app` runs the app straight from source.
+
 ## Running the server
+
+This is the same server without the desktop app, for a Raspberry Pi, a Linux box, or development.
 
 Requires the [.NET 10 SDK](https://dotnet.microsoft.com/download) and Node.js 20+.
 

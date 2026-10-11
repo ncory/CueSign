@@ -130,6 +130,15 @@ public sealed class ShowService
         }
     }
 
+    /// <summary>How many players are known and how many of them are online right now.</summary>
+    public (int Online, int Total) PlayerCounts()
+    {
+        lock (_gate)
+        {
+            return (_db.Players.Count(p => Rt(p.Id).Online), _db.Players.Count);
+        }
+    }
+
     /// <summary>What one player should be showing and caching. Contains nothing volatile, so unchanged state serializes identically.</summary>
     public string PlayerStateJson(string playerId)
     {
