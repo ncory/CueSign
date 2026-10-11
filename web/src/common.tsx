@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { Media } from './types';
+import type { Media, Playlist } from './types';
 
 export function Thumb({ media }: { media?: Media }) {
   if (!media) return <div className="thumb empty" />;
@@ -57,4 +57,39 @@ export function useNow(enabled: boolean, intervalMs = 250) {
     return () => window.clearInterval(timer);
   }, [enabled, intervalMs]);
   return enabled ? now : Date.now();
+}
+
+/** Warns before the page is closed or reloaded while there are unsaved edits. */
+export function useUnsavedWarning(dirty: boolean) {
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
+}
+
+/** The last part of a folder path. */
+export function folderName(path: string) {
+  return path.slice(path.lastIndexOf('/') + 1);
+}
+
+export function parentFolder(path: string) {
+  const slash = path.lastIndexOf('/');
+  return slash < 0 ? '' : path.slice(0, slash);
+}
+
+/** The media a screen shows at a cue: its own cell or, when empty cells hold, the nearest filled cell above. */
+export function mediaIdAt(playlist: Playlist, screenId: string, index: number): string | null {
+  for (let i = index; i >= 0; i--) {
+    const cell = playlist.cues[i]?.cells[screenId];
+    if (cell) return cell;
+    if (playlist.emptyCells !== 'hold') return null;
+  }
+  return null;
+}
+
+/** The column a player is on. A player loaded on a screen the playlist lacks wraps round. */
+export function screenOf(playlist: Playlist, screen: number) {
+  return playlist.screens[screen % playlist.screens.length];
 }

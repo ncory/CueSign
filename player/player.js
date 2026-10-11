@@ -4,15 +4,23 @@
 // it. Runs on a BrightSign (Node.js enabled, media cached on the SD card) and, for
 // previewing, in a desktop browser at http://<server>/player/ (no cache, media is streamed).
 //
+// A new player has no server. It announces itself on the network until a server pairs with
+// it, then remembers that server on the SD card.
+//
 // Written without newer syntax (optional chaining etc.) so it runs on older BrightSign OS.
 
 (function () {
   'use strict';
 
-  var VERSION = '0.1.0';
+  var VERSION = '0.3.0';
   // The override exists so the caching code can be exercised with plain Node off the device.
   var SD_ROOT = (typeof process !== 'undefined' && process.env && process.env.CUESIGN_SD_ROOT) || '/storage/sd';
   var CACHE_DIR = SD_ROOT + '/cuesign-cache';
+  var CACHE_URL = 'cuesign-cache/'; // relative to index.html, which sits in the SD card root
+  var PAIRING_FILE = SD_ROOT + '/cuesign-pairing.json';
+  var DISCOVERY_PORT = 48550;
+  var ANNOUNCE_MS = 2000;
+  var LOST_SERVER_MS = 6000;
   var STATUS_INTERVAL_MS = 2000;
   var RECONNECT_MS = 2000;
   var RETRY_DOWNLOAD_MS = 3000;
@@ -36,6 +44,8 @@
 
   var device = { id: null, model: null, os: null };
   var config = { server: null, name: null };
+  var pairing = null;       // { serverId, server } once a server has paired with this player
+  var fixedServer = false;  // true when config.json pins the server address, bypassing pairing
 
   function query(name) {
     var match = new RegExp('[?&]' + name + '=([^&]*)').exec(location.search);
@@ -53,12 +63,24 @@
       } catch (e) {
         device.id = require('os').hostname();
       }
+      // config.json is optional: it pins the server address where discovery is blocked.
       try {
-        var file = JSON.parse(fs.readFileSync(SD_ROOT + '/config.json', 'utf8'));
-        config.server = file.server;
-        config.name = file.name || null;
+        if (fs.existsSync(SD_ROOT + '/config.json')) {
+          var file = JSON.parse(fs.readFileSync(SD_ROOT + '/config.json', 'utf8'));
+          config.server = file.server || null;
+          config.name = file.name || null;
+          fixedServer = !!config.server;
+        }
       } catch (e) {
         setInfo('Cannot read config.json on the SD card: ' + e.message);
+      }
+      if (!fixedServer) {
+        try {
+          pairing = JSON.parse(fs.readFileSync(PAIRING_FILE, 'utf8'));
+          config.server = pairing.server;
+        } catch (e) {
+          pairing = null; // not paired yet
+        }
       }
     } else {
       // Browser preview: the page is served by the server itself.
@@ -98,7 +120,7 @@
           if (/\.part$/.test(file)) {
             fs.unlinkSync(path.join(CACHE_DIR, file)); // left over from an interrupted download
           } else if (/^[0-9a-f]{64}\./.test(file)) {
-            cache.ready[file.slice(0, 64)] = 'file://' + CACHE_DIR + '/' + file;
+            cache.ready[file.slice(0, 64)] = CACHE_URL + file;
           }
         });
       } catch (e) {
@@ -141,7 +163,7 @@
         cache.active = null;
         if (!err) {
           cache.error = null;
-          cache.ready[next.id] = 'file://' + CACHE_DIR + '/' + next.file;
+          cache.ready[next.id] = CACHE_URL + next.file;
           var waiting = cache.waiters[next.id] || [];
           delete cache.waiters[next.id];
           waiting.forEach(function (callback) { callback(cache.ready[next.id]); });
@@ -163,7 +185,7 @@
       Object.keys(cache.ready).forEach(function (id) {
         if (keep[id] || (showing && showing.asset.id === id)) return;
         try {
-          fs.unlinkSync(cache.ready[id].replace('file://', ''));
+          fs.unlinkSync(CACHE_DIR + '/' + cache.ready[id].slice(CACHE_URL.length));
         } catch (e) { /* already gone */ }
         delete cache.ready[id];
       });
@@ -335,8 +357,96 @@
   }
 
   video.onended = function () {
-    if (showing && showing.asset.kind === 'video') send({ type: 'ended', cue: showing.cue });
+    // Reported against the cue the server is on now, which may be later than the one the video started on.
+    if (showing && showing.asset.kind === 'video') send({ type: 'ended', cue: lastState ? lastState.cue : showing.cue });
   };
+
+  // ---- Self-update --------------------------------------------------------------------
+  //
+  // The server lists the player files it ships, with hashes. If ours differ, download the new
+  // ones to the SD card and restart on them, so a fix never needs the card pulled.
+  // TODO(production): reconsider before a final release; see the README.
+
+  var updateTried = {};     // server software versions already attempted since this page loaded
+  var updating = false;
+  var updateError = null;
+
+  function hashOfLocalFile(name) {
+    try {
+      return crypto.createHash('sha256').update(fs.readFileSync(SD_ROOT + '/' + name)).digest('hex');
+    } catch (e) {
+      return null; // missing
+    }
+  }
+
+  // Downloads one player file next to the real one as "<name>.update", verified by hash.
+  function stageUpdate(file, done) {
+    var staged = SD_ROOT + '/' + file.name + '.update';
+    var url = config.server + '/player/' + file.name;
+    var hash = crypto.createHash('sha256');
+    var output = fs.createWriteStream(staged);
+    var finished = false;
+    function finish(err) {
+      if (finished) return;
+      finished = true;
+      if (err) { try { output.destroy(); } catch (e) { /* ignore */ } }
+      done(err);
+    }
+    var request = (url.indexOf('https:') === 0 ? https : http).get(url, function (response) {
+      if (response.statusCode !== 200) return finish(new Error('HTTP ' + response.statusCode + ' for ' + file.name));
+      response.on('data', function (chunk) { hash.update(chunk); });
+      response.on('aborted', function () { finish(new Error('connection lost')); });
+      response.on('error', finish);
+      response.pipe(output);
+    });
+    request.on('error', finish);
+    request.setTimeout(30000, function () { request.abort(); finish(new Error('timed out')); });
+    output.on('error', finish);
+    output.on('finish', function () {
+      finish(hash.digest('hex') === file.sha256 ? null : new Error('checksum mismatch for ' + file.name));
+    });
+  }
+
+  function checkForUpdate(software) {
+    if (!onDevice || updating || !software || !software.files || updateTried[software.version]) return;
+    var stale = software.files.filter(function (file) {
+      return /^[A-Za-z0-9._-]+$/.test(file.name) && hashOfLocalFile(file.name) !== file.sha256;
+    });
+    if (!stale.length) return;
+
+    updateTried[software.version] = true; // one attempt per page load, so a bad update cannot loop
+    updating = true;
+    updateError = null;
+    sendStatus();
+
+    var index = 0;
+    (function next(err) {
+      if (err) {
+        stale.forEach(function (file) { try { fs.unlinkSync(SD_ROOT + '/' + file.name + '.update'); } catch (e) { /* not staged */ } });
+        updating = false;
+        updateError = 'Player update failed: ' + err.message;
+        sendStatus();
+        return;
+      }
+      if (index < stale.length) return stageUpdate(stale[index++], next);
+
+      // Everything downloaded and verified: swap the files in, then restart on them.
+      try {
+        stale.forEach(function (file) { fs.renameSync(SD_ROOT + '/' + file.name + '.update', SD_ROOT + '/' + file.name); });
+      } catch (e) {
+        return next(e);
+      }
+      var needsReboot = stale.some(function (file) { return file.name === 'autorun.brs'; });
+      try {
+        if (needsReboot) {
+          var System = require('@brightsign/system');
+          new System().reboot();
+          return;
+        }
+      } catch (e) { /* fall back to reloading the page */ }
+      if (location.reload) location.reload();
+    })(null);
+  }
 
   // ---- Server state -------------------------------------------------------------------
 
@@ -349,11 +459,14 @@
       // Remembered so the player can come back up on its own after a power cycle.
       fs.writeFile(CACHE_DIR + '/last-state.json', JSON.stringify(state), function () {});
     }
+    if (!fromDisk) checkForUpdate(state.software);
 
     cache.sync(state.assets || [], state.library || []);
 
     var current = state.current;
-    var key = current ? state.cue + ':' + current.id : 'black';
+    // The server changes current.key only when the item should (re)start; an item held across
+    // cues keeps its key and so keeps playing.
+    var key = current ? (current.key !== undefined ? current.key : state.cue) + ':' + current.id : 'black';
     if (key === targetKey) {
       if (current && showing && showing.key === key) video.loop = current.loop;
       updateInfo();
@@ -379,32 +492,151 @@
   var socket = null;
   var connected = false;
   var everConnected = false;
+  var connection = 0;       // bumped whenever the current socket is abandoned
+  var reconnectTimer = null;
+  var disconnectedSince = Date.now();
 
   function playerQuery() {
     return 'id=' + encodeURIComponent(device.id) + (config.name ? '&name=' + encodeURIComponent(config.name) : '');
   }
 
   function connect() {
+    clearTimeout(reconnectTimer);
+    if (!config.server) return;
+    var mine = ++connection;
+    var ws;
     try {
-      socket = new WebSocket(config.server.replace(/^http/, 'ws') + '/ws/player?' + playerQuery());
+      ws = new WebSocket(config.server.replace(/^http/, 'ws') + '/ws/player?' + playerQuery());
     } catch (e) {
-      setTimeout(connect, RECONNECT_MS);
+      reconnectTimer = setTimeout(connect, RECONNECT_MS);
       return;
     }
-    socket.onopen = function () {
+    socket = ws;
+    ws.onopen = function () {
+      if (mine !== connection) return;
       connected = everConnected = true;
       updateInfo();
       sendStatus();
     };
-    socket.onmessage = function (event) {
-      try { apply(JSON.parse(event.data)); } catch (e) { /* ignore a bad message */ }
+    ws.onmessage = function (event) {
+      if (mine !== connection) return;
+      var message;
+      try { message = JSON.parse(event.data); } catch (e) { return; }
+      if (message.type === 'unpair') unpair(); else apply(message);
     };
-    socket.onclose = function () {
+    ws.onclose = function () {
+      if (mine !== connection) return;
       connected = false;
       socket = null;
+      disconnectedSince = Date.now();
       updateInfo();
-      setTimeout(connect, RECONNECT_MS);
+      reconnectTimer = setTimeout(connect, RECONNECT_MS);
     };
+  }
+
+  function disconnect() {
+    connection++;
+    clearTimeout(reconnectTimer);
+    try { if (socket) socket.close(); } catch (e) { /* already closed */ }
+    socket = null;
+    connected = false;
+    disconnectedSince = Date.now();
+  }
+
+  // The server has let this player go: forget it and wait to be paired again.
+  function unpair() {
+    disconnect();
+    if (fixedServer || !onDevice) {
+      // Nothing to forget: the address comes from config.json or the page URL.
+      reconnectTimer = setTimeout(connect, RECONNECT_MS);
+      return;
+    }
+    pairing = null;
+    config.server = null;
+    everConnected = false;
+    try { fs.unlinkSync(PAIRING_FILE); } catch (e) { /* already gone */ }
+    try { fs.unlinkSync(CACHE_DIR + '/last-state.json'); } catch (e) { /* already gone */ }
+    lastState = null;
+    targetKey = null;
+    show(null, 0);
+    updateInfo();
+  }
+
+  // ---- Discovery and pairing ----------------------------------------------------------
+
+  // Every address worth broadcasting to: the limited broadcast plus each subnet's own.
+  function broadcastAddresses() {
+    var addresses = ['255.255.255.255'];
+    var interfaces = require('os').networkInterfaces();
+    Object.keys(interfaces).forEach(function (name) {
+      interfaces[name].forEach(function (net) {
+        if ((net.family !== 'IPv4' && net.family !== 4) || net.internal || !net.netmask) return;
+        var ip = net.address.split('.'), mask = net.netmask.split('.');
+        var broadcast = ip.map(function (part, i) { return (part | (~mask[i] & 255)); }).join('.');
+        if (addresses.indexOf(broadcast) < 0) addresses.push(broadcast);
+      });
+    });
+    return addresses;
+  }
+
+  function startDiscovery() {
+    if (!onDevice || fixedServer) return;
+    var udp;
+    try {
+      udp = require('dgram').createSocket('udp4');
+    } catch (e) {
+      setInfo('Cannot start discovery: ' + e.message);
+      return;
+    }
+    udp.on('error', function () { /* keep announcing; the network may not be up yet */ });
+
+    udp.on('message', function (data) {
+      var message;
+      try { message = JSON.parse(data.toString()); } catch (e) { return; }
+      if (!message || message.cuesign !== 1 || message.type !== 'pair') return;
+      if (!message.serverId || !/^https?:\/\//.test(message.url)) return;
+      if (pairing && pairing.serverId !== message.serverId) return; // belongs to another server
+
+      var server = String(message.url).replace(/\/+$/, '');
+      if (pairing && pairing.server === server) return; // nothing new; already retrying that address
+      pairing = { serverId: message.serverId, server: server };
+      try {
+        fs.writeFileSync(PAIRING_FILE, JSON.stringify(pairing));
+      } catch (e) {
+        setInfo('Cannot save pairing to the SD card: ' + e.message);
+      }
+      config.server = server;
+      disconnect();
+      connect();
+      updateInfo();
+    });
+
+    // Unpaired: announce until a server pairs with us. Paired but the server has been gone a
+    // while: announce with its id, so it can answer from a new address.
+    function announce() {
+      if (connected) return;
+      if (pairing && Date.now() - disconnectedSince < LOST_SERVER_MS) return;
+      var message = Buffer.from(JSON.stringify({
+        cuesign: 1,
+        type: 'announce',
+        id: device.id,
+        model: device.model,
+        os: device.os,
+        version: VERSION,
+        serverId: pairing ? pairing.serverId : null
+      }));
+      try {
+        broadcastAddresses().forEach(function (address) {
+          udp.send(message, 0, message.length, DISCOVERY_PORT, address, function () { /* retried next round */ });
+        });
+      } catch (e) { /* network not ready */ }
+    }
+
+    udp.bind(0, function () {
+      udp.setBroadcast(true);
+      announce();
+      setInterval(announce, ANNOUNCE_MS);
+    });
   }
 
   function send(message) {
@@ -422,9 +654,14 @@
   // Fallback for when the WebSocket cannot be established: plain polling.
   function poll() {
     if (connected || !config.server) return;
-    fetch(config.server + '/api/player/' + encodeURIComponent(device.id) + '/state?' + playerQuery())
+    var server = config.server;
+    fetch(server + '/api/player/' + encodeURIComponent(device.id) + '/state?' + playerQuery())
       .then(function (response) { return response.json(); })
-      .then(function (state) { everConnected = true; apply(state); })
+      .then(function (state) {
+        if (config.server !== server) return; // unpaired or re-paired while this was in flight
+        everConnected = true;
+        apply(state);
+      })
       .catch(function () { /* still unreachable */ });
   }
 
@@ -438,12 +675,14 @@
       model: device.model,
       os: device.os,
       storage: onDevice ? 'sd' : 'none',
+      link: !onDevice ? 'preview' : fixedServer ? 'fixed' : 'paired',
       showing: showing ? showing.asset.id : null,
       cue: showing ? showing.cue : null,
       cached: counts.cached,
       total: counts.total,
       downloading: active ? { id: active.id, received: active.received, size: active.size } : null,
-      error: displayError || cache.error
+      updating: updating,
+      error: updateError || displayError || cache.error
     });
   }
 
@@ -463,9 +702,9 @@
     var blackout = everConnected && lastState && lastState.assets && lastState.assets.length > 0;
     info.className = 'layer' + (idle && !blackout ? ' visible' : '');
     document.getElementById('info-id').textContent = device.id + (lastState && lastState.name !== device.id ? ' (' + lastState.name + ')' : '');
-    document.getElementById('info-server').textContent = config.server || 'not configured';
+    document.getElementById('info-server').textContent = config.server || 'not paired';
     document.getElementById('info-status').textContent = infoMessage ||
-      (!config.server ? 'Set "server" in config.json on the SD card.'
+      (!config.server ? 'Waiting to be paired. Open CueSign on the server and choose Pair on the Players tab.'
         : connected ? 'Connected. Assign a playlist to this player.'
         : everConnected ? 'Reconnecting…' : 'Connecting…');
   }
@@ -482,9 +721,8 @@
     } catch (e) { /* first run */ }
   }
 
-  if (config.server) {
-    connect();
-    setInterval(poll, RECONNECT_MS);
-    setInterval(sendStatus, STATUS_INTERVAL_MS);
-  }
+  startDiscovery();
+  connect();
+  setInterval(poll, RECONNECT_MS);
+  setInterval(sendStatus, STATUS_INTERVAL_MS);
 })();

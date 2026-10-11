@@ -20,11 +20,21 @@ web/      React + TypeScript control UI, built into server/wwwroot
   every player's cache.
 - **If the server goes away**, players keep showing their current item, and after a power cycle
   they come back up on the last item they were told to show.
-- **Playlists** are ordered lists of images and videos. Advance manually, or start a player's
-  timer to advance by each item's duration (a video with no duration plays once to its end).
-- **Groups** cue several players in one action. Each player keeps its own playlist and position,
-  so a group "Next" can advance different content on every screen at once. This is
-  close-enough-by-eye sync over the network, not frame lock.
+- **Playlists** are grids: each row is a cue and each column is a screen, so a multi-screen show
+  is built side by side and every screen changes on the same cue. A single-screen playlist is
+  just a grid with one column. Advance manually, or start the timer to advance by each cue's
+  duration (a cue with no duration waits for a video to play to its end).
+- **Screens are named columns, not players.** An empty cell either keeps that screen's previous
+  item playing or goes to black, as the playlist chooses.
+- **The library** is organised in folders. Dropping a folder onto the Media tab uploads everything
+  in it and recreates its subfolders. Removing a folder moves its contents up; it never deletes media.
+- **Edits to playlists, players and groups are drafts** until you press Save, so a batch of changes
+  reaches the players in one go. Loading a playlist and cueing, on the Live tab, act immediately.
+- **Groups** are ordered lists of players. Loading a playlist on a group gives its first player
+  the first screen, its second the second, and so on (extra players start again from the first
+  screen), and from then on the group cues and its timer move them together. A single player can
+  also load any one screen of a playlist on its own. This is close-enough-by-eye sync over the
+  network, not frame lock.
 
 ## Running the server
 
@@ -57,18 +67,39 @@ Build the web UI first, since it is copied from `server/wwwroot`.
 
 ## Setting up a BrightSign
 
-1. In the control UI open **Players → Add a player**, check the server address (it must be an
-   address the player can reach, not `localhost`) and download the SD card files.
-2. Unzip them onto the root of a blank SD card: `autorun.brs`, `index.html`, `player.js`,
-   `config.json`.
-3. Insert the card and power on. The player appears in the UI under its serial number; give it a
-   name and a playlist.
+Every player uses the same SD card contents; there is nothing to configure per player.
 
-`config.json` holds `"server"` and optionally `"name"` (used the first time the player registers).
-Give the server a fixed IP address or DHCP reservation, since players find it by this address.
+1. In the control UI open **Players → Add a player** and download the SD card files.
+2. Unzip them onto the root of a blank SD card: `autorun.brs`, `index.html`, `player.js`.
+3. Insert the card and power on. The screen shows "Waiting to be paired" and the player appears
+   at the top of the Players tab under its serial number.
+4. Choose **Pair**, then give the player a name and a playlist.
+
+### Pairing
+
+- An unpaired player broadcasts a small UDP announcement (port 48550) every two seconds. The
+  server lists what it hears; **Pair** answers the player with the server's address and id,
+  which the player saves to `cuesign-pairing.json` on the card.
+- A paired player ignores every other CueSign server. **Unpair** on the Players tab sends it
+  back to waiting; deleting `cuesign-pairing.json` from the card does the same.
+- If a paired player cannot reach its server for a few seconds it announces again, naming the
+  server it belongs to. That server answers with its current address, so the server does not
+  need a fixed IP.
+- Broadcasts only reach the server's own network segment, and the server's firewall must allow
+  inbound UDP 48550. Where that is not possible, put a `config.json` on the card to skip
+  pairing: `{ "server": "http://192.168.1.10:8080", "name": "Lobby" }` (`name` is optional). The
+  download dialog can add this file for you.
 
 To try things without hardware, open `http://<server>:8080/player/` in a browser tab. It behaves
 like a player but streams media instead of caching it. Add `?id=lobby` to pick its id.
+
+### Player updates
+
+A connected player keeps its own code up to date. The server sends the hashes of the player
+files it ships (`autorun.brs`, `index.html`, `player.js`); a player whose copies differ downloads
+the new ones to its card, verifies them and restarts on them (a reboot if `autorun.brs` changed,
+otherwise a page reload). So upgrading the server upgrades every player, with no cards to pull.
+Start the server with `--player-updates false` to turn this off.
 
 ### Player notes
 
@@ -86,12 +117,25 @@ like a player but streams media instead of caching it. Add `?id=lobby` to pick i
 | `WS /ws/player?id=` | server → `state`; player → `status`, `ended` |
 | `GET /api/player/{id}/state`, `POST /api/player/{id}/message` | polling fallback for the same messages |
 | `WS /ws/control`, `GET /api/state` | full snapshot for control UIs |
-| `POST /api/media?name=` (raw body), `PUT`/`DELETE /api/media/{id}` | library |
+| `POST /api/media?name=&folder=` (raw body), `PUT`/`DELETE /api/media/{id}` | library (`PUT` renames and/or moves) |
+| `POST`/`PUT /api/folders`, `DELETE /api/folders?path=` | library folders |
 | `POST /api/playlists`, `PUT`/`DELETE /api/playlists/{id}` | playlists |
-| `PUT`/`DELETE /api/players/{id}`, `POST /api/players/{id}/cue` | players |
+| `PUT`/`DELETE /api/players/{id}`, `POST /api/players/{id}/cue` | players (`DELETE` unpairs) |
+| `POST /api/players/{id}/load`, `POST /api/groups/{id}/load` | load a playlist from its first item |
+| `POST /api/discovered/{id}/pair` | pair a player that is announcing itself |
+| UDP 48550 | player → `announce` (broadcast); server → `pair` (reply) |
 | `POST /api/groups`, `PUT`/`DELETE /api/groups/{id}`, `POST /api/groups/{id}/cue` | groups |
 
 Cue body: `{"action": "next" | "prev" | "first" | "goto" | "play" | "pause" | "blackout", "index"?, "on"?}`.
 
-There is no authentication: anyone on the network can control the show. Run it on a trusted
-show network.
+## Before a production release
+
+- **Reconsider player self-update.** It is there to make development and early deployment
+  painless, but it means whichever server a player is paired with can replace the code that
+  player runs, and a bad update can leave a player needing its card reflashed. For a final
+  release decide whether to remove it, leave it off by default (`--player-updates false`), or
+  gate it behind an explicit "update players" action in the UI.
+- **Remove the debugging inspector.** `autorun.brs` opens the Chromium inspector on port 2999.
+
+There is no authentication: anyone on the network can control the show, and any CueSign server
+can pair with an unpaired player. Run it on a trusted show network.

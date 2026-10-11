@@ -18,6 +18,8 @@ public sealed class Hub
         /// <summary>Null for a control UI connection.</summary>
         public string? PlayerId { get; } = playerId;
         public string? LastSent;
+        /// <summary>Set once the player has been told to unpair; nothing more is sent to or accepted from it.</summary>
+        public bool Unpaired;
         // State messages supersede each other, so a slow client only ever needs the newest.
         public Channel<string> Outbox { get; } = Channel.CreateBounded<string>(
             new BoundedChannelOptions(4) { FullMode = BoundedChannelFullMode.DropOldest });
@@ -45,9 +47,23 @@ public sealed class Hub
         {
             var json = connection.PlayerId is { } id ? _show.PlayerStateJson(id) : _show.SnapshotJson();
 
-            if (connection.PlayerId is not null && json == connection.LastSent) return;
+            if (connection.Unpaired || (connection.PlayerId is not null && json == connection.LastSent)) return;
             connection.LastSent = json;
             connection.Outbox.Writer.TryWrite(json);
+        }
+    }
+
+    /// <summary>Tells a connected player to forget this server and go back to waiting to be paired.</summary>
+    public void Unpair(string playerId)
+    {
+        foreach (var connection in _connections.Values.Where(c => c.PlayerId == playerId))
+        {
+            lock (connection)
+            {
+                connection.Unpaired = true;
+                connection.Outbox.Writer.TryWrite("{\"type\":\"unpair\"}");
+                connection.Outbox.Writer.TryComplete();
+            }
         }
     }
 
@@ -74,7 +90,8 @@ public sealed class Hub
                     message.Write(buffer, 0, result.Count);
                 } while (!result.EndOfMessage);
 
-                if (playerId is null) continue;
+                // Anything still in flight from an unpaired player must not register it again.
+                if (playerId is null || connection.Unpaired) continue;
                 try
                 {
                     using var doc = JsonDocument.Parse(message.ToArray());
@@ -114,6 +131,13 @@ public sealed class Hub
         {
             await foreach (var json in connection.Outbox.Reader.ReadAllAsync(cancel))
                 await connection.Socket.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, cancel);
+
+            if (connection.Unpaired && connection.Socket.State == WebSocketState.Open)
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+                timeout.CancelAfter(TimeSpan.FromSeconds(2));
+                await connection.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "unpaired", timeout.Token);
+            }
         }
         catch (Exception e) when (e is WebSocketException or OperationCanceledException or IOException or ObjectDisposedException)
         {
