@@ -14,7 +14,7 @@ cd "$(dirname "$0")/.."
 ARCH="${ARCH:-$(uname -m | sed 's/x86_64/x64/')}"
 DOTNET="${DOTNET:-$(command -v dotnet || echo "$HOME/.dotnet/dotnet")}"
 VERSION="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' app/CueSign.App.csproj)"
-OUT="dist/mac-$ARCH"
+OUT="${OUT:-dist/mac-$ARCH}" # override to build without replacing a copy that is running from dist
 # The bundle is assembled and signed in a temporary folder: cloud-synced folders such as iCloud
 # Drive attach extended attributes to files, and codesign refuses to sign anything carrying them.
 STAGE="$(mktemp -d)"
@@ -37,8 +37,9 @@ xattr -cr "$APP"
 
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then
   echo "==> Signing as $CODESIGN_IDENTITY"
-  # Inside out: every file in MacOS first, then the bundle that seals them.
-  find "$APP/Contents/MacOS" -type f -print0 | while IFS= read -r -d '' file; do
+  # Inside out: every file in MacOS except the main executable, then the bundle. Signing the
+  # bundle signs the main executable and seals the rest, so that has to come last.
+  find "$APP/Contents/MacOS" -type f ! -path "$APP/Contents/MacOS/CueSign" -print0 | while IFS= read -r -d '' file; do
     codesign --force --timestamp --options runtime --entitlements app/macos/entitlements.plist --sign "$CODESIGN_IDENTITY" "$file"
   done
   codesign --force --timestamp --options runtime --entitlements app/macos/entitlements.plist --sign "$CODESIGN_IDENTITY" "$APP"

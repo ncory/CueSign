@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>CueSign</string>
     <key>CFBundleIdentifier</key>
-    <string>com.cuesign.app</string>
+    <string>com.ncory.cuesign</string>
     <key>CFBundleExecutable</key>
     <string>CueSign</string>
     <key>CFBundleIconFile</key>

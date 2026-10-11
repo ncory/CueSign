@@ -8,7 +8,7 @@ namespace CueSign.App;
 /// </summary>
 internal static class LoginItem
 {
-    private const string Label = "com.cuesign.app";
+    private const string Label = "com.ncory.cuesign";
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
     private static string AgentPath => Path.Combine(
